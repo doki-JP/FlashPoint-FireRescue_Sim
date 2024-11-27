@@ -14,6 +14,7 @@ plt.rcParams["animation.html"] = "jshtml"
 matplotlib.rcParams['animation.embed_limit'] = 2**128
 
 import seaborn as sns
+import random
 
 from collections import deque
 
@@ -22,7 +23,9 @@ import logging
 import json
 import re
 
+
 from random import choices
+
 
 
 
@@ -31,13 +34,187 @@ class PlayerAgent(Agent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.actionPoints = 4
-        self.extraActionPoints = 0
+        self.savedAP = 0
         self.totalAPUsed = 0
         self.isCarryingVictim = False
         self.isKnockedOut = False
         self.victimsRescued = 0
         self.wasKnockedOut = 0
-        self.cellsVisited = 0
+        self.closestExit = None
+
+    def findClosestExit(self):
+        
+        closest_exit = None
+        min_distance = float('inf')
+        for exit_pos in self.model.exitPos:
+            distance = abs(self.pos[0] - exit_pos[1]) + abs(self.pos[1] - exit_pos[0])
+            if distance < min_distance:
+                min_distance = distance
+                closest_exit = exit_pos
+
+        self.closestExit = closest_exit
+    
+
+    def extinguish(self):
+        cell_status = self.model.board[self.pos[1]][self.pos[0]]["fireState"]
+        if cell_status == 2:  # Fuego
+            self.model.board[self.pos[1]][self.pos[0]]["fireState"] = 0  # Apagar
+            self.actionPoints -= 2
+            return
+        elif cell_status == 1:  # Humo
+            self.model.board[self.pos[1]][self.pos[0]]["fireState"] = 0  # Apagar
+            self.actionPoints -= 1
+            return
+
+        neighbors = self.model.grid.get_neighborhood(self.pos, moore=False, include_center=False)
+        for neighbor in neighbors:
+            if self.actionPoints <= 0:
+                break
+            cell_status = self.model.board[neighbor[1]][neighbor[0]]["fireState"]
+            if cell_status == 2:  # Fuego
+                self.model.board[neighbor[1]][neighbor[0]]["fireState"] = 1  # Convertir a humo
+                self.actionPoints -= 2
+                break
+            elif cell_status == 1:  # Humo
+                self.model.board[neighbor[1]][neighbor[0]]["fireState"] = 0  # Eliminar humo
+                self.actionPoints -= 1
+                break
+
+    def turnToSmoke(self):
+        
+        cell_status = self.model.board[self.pos[1]][self.pos[0]]["fireState"]
+        if cell_status == 2:  # Fuego
+            self.model.board[self.pos[1]][self.pos[0]]["fireState"] = 1  # Convertir a humo
+            self.actionPoints -= 1
+            return
+
+        neighbors = self.model.grid.get_neighborhood(self.pos, moore=False, include_center=False)
+        for neighbor in neighbors:
+            if self.actionPoints <= 0:
+                break
+            cell_status = self.model.board[neighbor[1]][neighbor[0]]["fireState"]
+            if cell_status == 2:  # Fuego
+                self.model.board[neighbor[1]][neighbor[0]]["fireState"] = 1  # Convertir a humo
+                self.actionPoints -= 1
+                break
+    
+    def rescue(self):
+        if self.model.board[self.pos[1]][self.pos[0]]["marker"] == 2:
+            self.isCarryingVictim = True
+            self.model.board[self.pos[1]][self.pos[0]]["marker"] = 0
+            self.victimsRescued += 1
+            return True
+        elif self.model.board[self.pos[1]][self.pos[0]]["marker"] == 1:
+            self.model.board[self.pos[1]][self.pos[0]]["marker"] = 0
+            return False
+        return False
+            
+    def moveTowards(self, target):
+        
+        x_diff = target[0] - self.pos[0]
+        y_diff = target[1] - self.pos[1]
+        new_x = self.pos[0] + (1 if x_diff > 0 else -1 if x_diff < 0 else 0)
+        new_y = self.pos[1] + (1 if y_diff > 0 else -1 if y_diff < 0 else 0)
+        new_pos = (new_x, new_y)
+
+        if new_y < 0 or new_y >= len(self.model.board) or new_x < 0 or new_x >= len(self.model.board[0]):
+            
+            return False
+
+        if not self.model.grid.out_of_bounds(new_pos) and self.model.grid.is_cell_empty(new_pos):
+            self.model.grid.move_agent(self, new_pos)
+            if self.model.board[new_pos[1]][new_pos[0]]["marker"] == 1 or self.model.board[new_pos[1]][new_pos[0]]["marker"] == 2:
+                self.rescue()
+                
+            self.actionPoints -= 1
+        else:
+            
+            return False
+        return True
+      
+    def searchAndRescue(self):
+
+        neighbors = self.model.grid.get_neighborhood(self.pos, moore=False, include_center=True)
+        for pos in neighbors:
+            if self.actionPoints <= 0:
+                
+                break
+            if self.model.board[pos[1]][pos[0]]["marker"] == 1 or self.model.board[pos[1]][pos[0]]["marker"] == 2:  # POI
+                if self.moveTowards(pos):
+                    
+                    self.rescue()
+                break
+            elif self.model.board[pos[1]][pos[0]]["fireState"] == 2:  # Fuego
+                self.extinguish()
+                
+
+
+
+    def wiggle(self):
+            
+            if self.actionPoints > 0:
+                neighbors = self.model.grid.get_neighborhood(self.pos, moore=False, include_center=False)
+                indexes = [x for x in range(len(neighbors))]
+                np.random.shuffle(indexes)
+                
+                if neighbors:
+                    for index in indexes:
+                        position = neighbors[index]
+                        if index not in self.model.check_walls(self.pos):
+                            self.model.grid.move_agent(self, position)
+                            self.actionPoints -= 1
+                            return True
+
+
+            return False
+
+    def step(self):
+        
+        
+        if self.isKnockedOut:
+            self.findClosestExit()
+            self.pos = self.closestExit
+            self.model.board[self.pos[1]][self.pos[0]]["fireState"] = 0
+            self.isKnockedOut = False
+            return
+        
+        self.actionPoints = 4
+
+        if self.actionPoints <= 0:
+            
+            return
+
+        if self.isCarryingVictim:
+            self.findClosestExit()
+            if self.moveTowards(self.closestExit):
+                if self.pos == self.closestExit:
+                    self.model.rescued += 1
+                    self.isCarryingVictim = False
+
+        else:
+            closest_poi = None
+            min_distance = float('inf')
+            for y in range(self.model.grid.height):
+                for x in range(self.model.grid.width):
+                    if "marker" in self.model.board[y][x] and self.model.board[y][x]["marker"] in [1, 2]:
+                        distance = abs(self.pos[0] - x) + abs(self.pos[1] - y)
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_poi = (x, y)
+            if closest_poi:
+                if self.moveTowards(closest_poi):
+                    if self.pos == closest_poi:
+                        self.rescue()
+            else:
+                self.findClosestExit()
+                self.moveTowards(self.closestExit)
+
+        if self.actionPoints > 0:
+            self.wiggle()
+            self.savedAP = self.actionPoints
+        else:
+            self.savedAP = 0
+
 
 
 
@@ -91,6 +268,7 @@ def load_scenario(file_path):
 
 
 def get_grid(model):
+  # grid = [[0] * 10 for _ in range(8)]
   grid = np.zeros( (model.grid.height, model.grid.width) )
 
   for content, (x, y) in model.grid.coord_iter(): 
@@ -171,7 +349,6 @@ def get_fire_grid(model):
     fire_grid.append(row)
   return fire_grid
 
-
 def get_agent_positions(model):
   agent_data = []
   for agent in model.schedule.agents:
@@ -179,8 +356,6 @@ def get_agent_positions(model):
     x,y = agent.pos
     agent_data.append([x, y, ida])
   return agent_data
-
-
 
 
 def generate_board(width, height):
@@ -191,8 +366,8 @@ def generate_board(width, height):
             cell = {"wall" : [0,0,0,0],"fireState" : 0, "marker" : 0, "revealed": 0, "damage" : [0,0,0,0], "door" : [0,0,0,0]}
             row.append(cell.copy())
         board.append(row)
+    return board
 
-    return board 
 
 
 # Modelo para la simulación
@@ -200,12 +375,16 @@ def generate_board(width, height):
 class FireRescueModel(Model):
   def __init__(self, walls, markers, fires, doors, entry_points, players):
     super().__init__()
-    self.victims = 0
+    self.victimsLost = 0
     self.rescued = 0
     self.steps = 0
+    self.POI = markers
+    self.exitPos = entry_points
+    self.fires = fires
     self.ending = False
     self.false_markers = 5
     self.true_markers = 10
+    self.running = True
     self.grid = MultiGrid(10, 8, torus = False)
     self.schedule = BaseScheduler(self)
     self.datacollector = DataCollector( # Datos a recolectar para generar el reporte.
@@ -219,7 +398,7 @@ class FireRescueModel(Model):
                            "Steps" : lambda model: model.steps,
                            "Fire" : lambda model: sum(1 for i in range(0, 10) for j in range(0, 8) if model.board[j][i]["fireState"] == 2), # / model.fire_board.size,
                            "Damage" : lambda model: model.damage,
-                           "Victims" : lambda model: model.victims,
+                           "Victims" : lambda model: model.victimsLost,
                            "Rescued" : lambda model: model.rescued,
                            "GameEnd" : lambda model: model.ending,
                            "AgentInfo" : get_agent_positions},
@@ -234,15 +413,11 @@ class FireRescueModel(Model):
     height = 6
     self.board = generate_board(width, height) # Generar el tablero.
     self.damage = 0                                                                                
-    
-    # Generate initial fire
+
     for cord in fires:
       x,y = cord
       self.board[x][y]["fireState"] = 2
       
-      # print("Fuegos en ",x,y,self.board[x][y])
-
-    # Generate people to rescue
     for cord in markers:
       x,y,v = cord
       if v == "f":
@@ -271,15 +446,17 @@ class FireRescueModel(Model):
           self.board[x2][y2]["door"][0] = 1  # Puerta arriba en cell2
 
 
-    # print(self.board)
+
     for y in range(len(walls)):
       for x in range(len(walls[0])):
-        self.board[y+1][x+1]["wall"] = walls[y][x]    
+        self.board[y+1][x+1]["wall"] = walls[y][x]
 
+    
     # Break entrance walls
-    print(entry_points)
+
     for pos in entry_points:
       y, x = pos
+
       if x - 1 == 0:
         self.board[y][x]["wall"][1] = 0
       if x + 1 == 9:
@@ -290,7 +467,6 @@ class FireRescueModel(Model):
         self.board[y][x]["wall"][2] = 0
          
     
-    print("Initial board: ", self.board)
 
     for i in range(players): # Generar a los agentes.
       agent = PlayerAgent(i, self)
@@ -332,172 +508,75 @@ class FireRescueModel(Model):
     
     if self.board[y][x]["fireState"] == 0:
       self.board[y][x]["fireState"] = 1
+
     elif self.board[y][x]["fireState"] == 1:
       self.board[y][x]["fireState"] = 2
 
     elif self.board[y][x]["fireState"] == 2:
-      self.spread_fire((x, y))
+      self.spread_fire((x, y), 0)
+      self.spread_fire((x, y), 1)
+      self.spread_fire((x, y), 2)
+      self.spread_fire((x, y), 3)
+
     
+  def spread_fire(self, pos, direction):
+    queue = deque([pos])
+    while queue:
+      x, y = queue.popleft()
+      
+      if 0 < x < len(self.board[0]) and 0 < y < len(self.board):
+        neighbor_offset = {
+                0: (0, 1),  # arriba
+                2: (0, -1),   # abajo
+                3: (1, 0),   # derecha
+                1: (-1, 0)  # izquierda
+              }
+        
+        oppositeDirection = {0: 2, 2: 0, 1: 3, 3: 1}[direction]
 
-  def spread_fire2(self, pos, visited):
-    x, y = pos
-    adyacentCells = self.grid.get_neighborhood(pos, moore=False, include_center=False)
-    walls, orientations = self.check_walls(pos)
+        dx, dy = neighbor_offset[direction]
+        next_x, next_y = x + dx, y + dy
 
-    for cell in adyacentCells:
-      x2, y2 = cell
-      if cell not in walls:  
+        walls, orientations = self.check_walls((x, y))
+        
+        if self.board[y][x]["door"][direction] == 0: # si no es una puerta
+          if 0 < next_x < len(self.board[0]) and 0 < next_y < len(self.board):
+            if (next_x, next_y) not in walls: # si no es una pared
+              if self.board[next_y][next_x]["fireState"] == 0:
+                self.board[next_y][next_x]["fireState"] = 2
+                
+              
+              elif self.board[next_y][next_x]["fireState"] == 1:
+                self.board[next_y][next_x]["fireState"] = 2
 
-        if cell not in visited:
-          visited.append(cell)
-
-          if self.board[y2][x2]["fireState"] == 0:
-            self.board[y2][x2]["fireState"] = 1
-
-          elif self.board[y2][x2]["fireState"] == 1:
-            self.board[y2][x2]["fireState"] = 2
-
-          elif self.board[y2][x2]["fireState"] == 2:
-            self.spread_fire(cell, visited)
-            
-      elif cell in walls:
-          if cell not in visited:
-            visited.append(cell)
-            i = walls.index(cell)
-            n = orientations[i]
-            neighbor_offset = {
-              0: (0, 1),  # arriba
-              2: (0, -1),   # abajo
-              3: (1, 0),   # derecha
-              1: (-1, 0)  # izquierda
-            }
-            dx, dy = neighbor_offset[n]
-            neighbor_x, neighbor_y = x + dx, y + dy
+              elif self.board[next_y][next_x]["fireState"] == 2:
+                queue.append((next_x, next_y))
 
 
-            if self.board[y][x]["door"][n] == 0:
-              if self.board[y][x]["damage"][n] < 2:
-                self.board[y][x]["damage"][n] += 1
-                self.damage += 1
-                print(self.steps, self.damage,  "damage in ", x, y)
+            elif (next_x, next_y) in walls: # Si es una pared
 
-              if self.board[y][x]["damage"][n] == 2:
+              if self.board[y][x]["damage"][direction] < 2:
+                  self.board[y][x]["damage"][direction] += 1
+                  self.damage += 1
 
-                self.board[y][x]["wall"][n] = 0
+              if self.board[y][x]["damage"][direction] == 2:
+                  self.board[y][x]["wall"][direction] = 0
 
+              if 0 < next_x < len(self.board[0]) and 0 < next_y < len(self.board):
 
-              if 0 < neighbor_x < 10 and 0 < neighbor_y < 8:
+                if self.board[next_y][next_x]["damage"][oppositeDirection] < 2:
+                    self.board[next_y][next_x]["damage"][oppositeDirection] += 1
 
-                  opposite_orientation = {0: 2, 2: 0, 1: 3, 3: 1}[n]
+                if self.board[next_y][next_x]["damage"][oppositeDirection] == 2:
+                    self.board[next_y][next_x]["wall"][oppositeDirection] = 0
+          
+        elif self.board[y][x]["door"][direction] != 0: # si es una puerta
 
-                  if self.board[neighbor_y][neighbor_x]["damage"][opposite_orientation] < 2:
-                      self.board[neighbor_y][neighbor_x]["damage"][opposite_orientation] += 1
+          self.board[y][x]["door"][direction] = 0
+          self.board[y][x]["wall"][direction] = 0
 
-                  if self.board[neighbor_y][neighbor_x]["damage"][opposite_orientation] == 2:
-                      self.board[neighbor_y][neighbor_x]["wall"][opposite_orientation] = 0
-
-            # Si la explosión es en una puerta
-            elif self.board[y][x]["door"][n] == 2 or self.board[y][x]["door"][n] == 1:
-
-              self.board[y][x]["door"][n] = 0
-              self.board[y][x]["wall"][n] = 0
-
-
-              if 0 < neighbor_x < 10 and 0 < neighbor_y < 8:
-
-                opposite_orientation = {0: 2, 2: 0, 1: 3, 3: 1}[n]
-
-                if self.board[neighbor_y][neighbor_x]["door"][opposite_orientation] == 2 or self.board[neighbor_y][neighbor_x]["door"][opposite_orientation] == 1:
-                    self.board[neighbor_y][neighbor_x]["wall"][opposite_orientation] = 0
-                    self.board[neighbor_y][neighbor_x]["door"][opposite_orientation] = 0
-
-
-
-  def spread_fire(self, pos):
-      queue = deque([pos])  # Cola para manejar las celdas pendientes por visitar
-      visited = set()       # Conjunto para guardar las celdas ya visitadas
-      damaged_walls = set() # Conjunto para rastrear paredes dañadas durante el turno
-
-      while queue:
-          x, y = queue.popleft()
-          if (x, y) in visited:
-              continue
-
-          visited.add((x, y))
-          adyacentCells = self.grid.get_neighborhood((x, y), moore=False, include_center=False)
-          walls, orientations = self.check_walls((x, y))
-          neighbor_offset = {
-            0: (0, 1),  # arriba
-            2: (0, -1),   # abajo
-            3: (1, 0),   # derecha
-            1: (-1, 0)  # izquierda
-          }
-
-          for cell in adyacentCells:
-              x2, y2 = cell
-
-
-              if cell in walls:
-                  # Lógica para paredes y puertas
-                  if (x2, y2) not in visited:
-                      i = walls.index(cell)
-                      n = orientations[i]
-                      wall_id = ((x, y), n)  # Identificador único para la pared
-
-                      # Manejo de la lógica de explosión para paredes y puertas
-                      if wall_id not in damaged_walls:
-                          if self.board[y][x]["door"][n] == 0:  # Pared
-                              if self.board[y][x]["damage"][n] < 2:
-                                  self.board[y][x]["damage"][n] += 1
-                                  self.damage += 1
-                                  damaged_walls.add(wall_id)  # Marcar la pared como dañada
-
-                              if self.board[y][x]["damage"][n] == 2:
-                                  self.board[y][x]["wall"][n] = 0  # Destruir pared
-
-                              # Daño a la pared opuesta si existe
-                              dx, dy = neighbor_offset[n]
-                              neighbor_x, neighbor_y = x + dx, y + dy
-                              if 0 <= neighbor_x < len(self.board[0]) and 0 <= neighbor_y < len(self.board):
-                                  opposite_orientation = {0: 2, 2: 0, 1: 3, 3: 1}[n]
-                                  opposite_wall_id = ((neighbor_x, neighbor_y), opposite_orientation)
-
-                                  if opposite_wall_id not in damaged_walls:
-                                      if self.board[neighbor_y][neighbor_x]["damage"][opposite_orientation] < 2:
-                                          self.board[neighbor_y][neighbor_x]["damage"][opposite_orientation] += 1
-                                          damaged_walls.add(opposite_wall_id)  # Marcar la pared como dañada
-
-                                      if self.board[neighbor_y][neighbor_x]["damage"][opposite_orientation] == 2:
-                                          self.board[neighbor_y][neighbor_x]["wall"][opposite_orientation] = 0
-
-                          # Si la explosión es en una puerta
-                          elif self.board[y][x]["door"][n] in [1, 2]:  # Puerta
-                              self.board[y][x]["door"][n] = 0
-                              self.board[y][x]["wall"][n] = 0
-                              damaged_walls.add(wall_id)  # Marcar la pared como dañada
-
-                              # Destruir puerta en la posición opuesta
-                              dx, dy = neighbor_offset[n]
-                              neighbor_x, neighbor_y = x + dx, y + dy
-                              if 0 <= neighbor_x < len(self.board[0]) and 0 <= neighbor_y < len(self.board):
-                                  opposite_orientation = {0: 2, 2: 0, 1: 3, 3: 1}[n]
-                                  opposite_wall_id = ((neighbor_x, neighbor_y), opposite_orientation)
-
-                                  if opposite_wall_id not in damaged_walls:
-                                      self.board[neighbor_y][neighbor_x]["door"][opposite_orientation] = 0
-                                      self.board[neighbor_y][neighbor_x]["wall"][opposite_orientation] = 0
-                                      damaged_walls.add(opposite_wall_id)  # Marcar la pared como dañada
-                  continue
-
-              elif cell not in walls:  
-                  # Expansión de fuego o humo
-                  if self.board[y2][x2]["fireState"] == 0:
-                      self.board[y2][x2]["fireState"] = 1  # Humo
-                  elif self.board[y2][x2]["fireState"] == 1:
-                      self.board[y2][x2]["fireState"] = 2  # Fuego
-                  elif self.board[y2][x2]["fireState"] == 2:
-                      queue.append(cell)  # Añadir a la cola para expandir el fuego
-
+          self.board[next_y][next_x]["door"][oppositeDirection] = 0
+          self.board[next_y][next_x]["wall"][oppositeDirection] = 0
 
 
   def check_smoke(self):
@@ -506,12 +585,14 @@ class FireRescueModel(Model):
             if self.board[j][i]["fireState"] == 1:
               neighbors = self.grid.get_neighborhood((i, j), moore=False, include_center=False)
               walls, o = self.check_walls((i, j))
+              
               for cell in neighbors:
                 if cell not in walls:
+                  
                   x, y = cell
                   if self.board[y][x]["fireState"] == 2:
                     self.board[j][i]["fireState"] = 2
-
+                    
 
 
   def check_fire(self):
@@ -520,7 +601,7 @@ class FireRescueModel(Model):
             if self.board[j][i]["fireState"] == 2:
               if self.board[j][i]["marker"] == 2:
                 self.board[j][i]["marker"] = 0
-                self.victims += 1
+                self.victimsLost += 1
               elif self.board[j][i]["marker"] == 1:
                 self.board[j][i]["marker"] = 0
 
@@ -530,9 +611,12 @@ class FireRescueModel(Model):
         for i in range(0, self.grid.width):
             if self.board[j][i]["marker"] == 1  or self.board[j][i]["marker"] == 2:
               totalMarkers += 1
+              
     markers = 3 - totalMarkers
-
+    
     while markers > 0:
+      if self.true_markers == 0 and self.false_markers == 0:
+        return
       chosen = choices(['true', 'false'], weights=[self.true_markers, self.false_markers], k=1)[0]
 
         # Reducir el número de marcadores según el tipo seleccionado
@@ -540,6 +624,7 @@ class FireRescueModel(Model):
       y = self.random.randrange(1,7)
       if self.board[y][x]["fireState"] == 0 and self.board[y][x]["marker"] == 0:
         if chosen == 'true':
+          self.POI.append((x, y, "v"))
           self.true_markers -= 1
           self.board[y][x]["marker"] = 2
           markers -= 1
@@ -548,18 +633,22 @@ class FireRescueModel(Model):
           self.false_markers -= 1
           self.board[y][x]["marker"] = 1
           markers -= 1
-    
-       
- 
 
   def is_game_finished(self):
-    if self.damage >= 24:
+    if self.damage >= 24: #Valor real 24
+      self.running = False
       return True
-    if self.victims > 3:
+    if self.victimsLost > 3: #Valor real 3
+      self.running = False
       return True
+    if self.rescued >= 7:
+      self.running = False
+      return True
+      
+    self.running = True
     return False
-  
-
+    
+    
   def step(self): 
     if not self.is_game_finished():
       self.steps += 1
@@ -586,15 +675,12 @@ while not model.ending and Max_steps > 0:
 
 print("Steps: ", model.steps)
 print("Damage: ", model.damage)
-print("Victims: ", model.victims)
-
-
+print("Victims: ", model.victimsLost)
+print("Rescued: ", model.rescued)
 
 
 
 all_grids = model.datacollector.get_model_vars_dataframe()
-all_grids.head(10)
-
 
 
 
@@ -701,10 +787,19 @@ def convert_agent_data_to_string(agent_data):
     result = f"{total} \n{result}"
     return result.strip()
 
+# Convertir la lista de paredes a la cadena deseada
+wall_grid_string = convert_wall_grid_to_string(all_grids["WallGrid"][0])
+
+markers_string =convert_marker_pos_to_string(all_grids["MarkerGrid"][0], all_grids["RevealedGrid"][0])
+
+fire_string = convert_fire_pos_to_string(all_grids["FireGrid"][0])
+
+door_string = convert_door_pos_to_string(all_grids["DoorsGrid"][0])
+
+entry_points_string = convert_entry_points_pos_to_string(entry_points)
 
 
 def get_end(step):
-    print(all_grids["GameEnd"][step])
     if all_grids["GameEnd"][step]:
         return "true"
     return "false"
@@ -725,8 +820,6 @@ def get_json(step):
     jsonString = f"{wall_grid_string} \n{markers_string} \n{fire_string} \n{door_string} \n{entry_points_string} \n{agent_data_string}"
 
     return jsonString
-
-print(get_json(0))
 
 
 
